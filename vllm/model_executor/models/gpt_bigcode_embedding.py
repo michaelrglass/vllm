@@ -42,8 +42,23 @@ from typing import Iterable, List, Optional, Set, Tuple, Union
 
 
 class TokenClassifierMixin:
+    """
+    A class providing functionality for token classification, including
+    initializing a classification head, setting candidate token positions, and pooling.
+    """
+
     def init_pooler(self, hidden_size: int, end_token_only: bool, n_classes: int,
                     candidate_start_ndx: int, candidate_end_ndx: int):
+        """
+        Initializes the classifier head used for token classification.
+
+        Args:
+            hidden_size (int): The size of the hidden representations.
+            end_token_only (bool): If True, only end tokens are used for classification.
+            n_classes (int): The number of classes for classification.
+            candidate_start_ndx (int): The token ID for candidate start tokens.
+            candidate_end_ndx (int): The token ID for candidate end tokens.
+        """
         if end_token_only:
             self.start_end_classifier = nn.Linear(hidden_size, n_classes)
         else:
@@ -52,16 +67,28 @@ class TokenClassifierMixin:
         self.candidate_start_ndx, self.candidate_end_ndx = candidate_start_ndx, candidate_end_ndx
         self.cand_starts, self.cand_ends = None, None
 
-    def set_candidate_positions(self, input_ids):
-        # forward will set
+    def set_candidate_positions(self, input_ids: torch.Tensor):
+        """
+        Sets the positions of candidate start and end tokens.
+
+        Args:
+            input_ids (torch.Tensor): Input token IDs.
+        """
         self.cand_starts = (input_ids == self.candidate_start_ndx)
         self.cand_ends = (input_ids == self.candidate_end_ndx)
 
-    def pooler(
-            self,
-            hidden_states: torch.Tensor,
-            pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
+    def pooler(self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata) -> Optional[PoolerOutput]:
+        """
+        Pools hidden states based on candidate token positions.
+
+        Args:
+            hidden_states (torch.Tensor): The hidden states output from the model.
+            pooling_metadata (PoolingMetadata): Metadata containing prompt lengths.
+
+        Returns:
+            Optional[PoolerOutput]: The output containing pooled representations.
+        """
+        # Extract candidate token positions and apply pooling logic
         # extract candidate
         all_logits = []
         if self.cand_starts.any() and self.cand_ends.any():
@@ -120,7 +147,8 @@ class TokenClassifierMixin:
             # split cand logit into list of logits
             offset = 0
             for num_candidate in num_candidates:
-                all_logits.append(cand_logits[offset:offset + num_candidate, :].detach().cpu().view(-1))  # Is .cpu() bad here?
+                all_logits.append(
+                    cand_logits[offset:offset + num_candidate, :].detach().cpu().view(-1))  # Is .cpu() bad here?
                 offset += num_candidate
 
         if len(all_logits) > 0:
@@ -134,6 +162,10 @@ class TokenClassifierMixin:
 
 
 class GPTBigCodeForEmbeddingConfig(GPTBigCodeConfig):
+    """
+    Configuration class for GPTBigCodeForEmbedding, extending GPTBigCodeConfig
+    to include additional attributes for token classification.
+    """
     model_type = "gpt_bigcode_embedding"
 
     def __init__(
@@ -163,6 +195,15 @@ class GPTBigCodeForEmbeddingConfig(GPTBigCodeConfig):
             candidate_end_ndx: int = 5090,
             **kwargs,
     ):
+        """
+        Initializes the GPTBigCodeForEmbeddingConfig.
+
+        Args:
+            end_token_only (bool): If True, only end tokens are used for classification.
+            n_classes (int): The number of classification classes.
+            candidate_start_ndx (int): Token ID for start candidates.
+            candidate_end_ndx (int): Token ID for end candidates.
+        """
         super().__init__(
             vocab_size=vocab_size,
             n_positions=n_positions,
@@ -191,6 +232,9 @@ class GPTBigCodeForEmbeddingConfig(GPTBigCodeConfig):
 
 
 class GPTBigCodeForEmbedding(nn.Module, SupportsLoRA, SupportsPP, TokenClassifierMixin):
+    """
+    GPTBigCode model adapted for token span classification.
+    """
     packed_modules_mapping = {"c_attn": ["c_attn"]}
 
     supported_lora_modules = ["c_fc", "c_proj", "wte", "c_attn"]
@@ -212,26 +256,30 @@ class GPTBigCodeForEmbedding(nn.Module, SupportsLoRA, SupportsPP, TokenClassifie
         self.lora_config = lora_config
 
         self.quant_config = quant_config
-        self.transformer = GPTBigCodeModel(vllm_config=vllm_config,
-                                           prefix=prefix)
+        self.transformer = GPTBigCodeModel(vllm_config=vllm_config, prefix=prefix)
 
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
-        self.init_pooler(self.transformer.config.hidden_size, end_token_only=config.end_token_only,
-                         n_classes=config.n_classes,
-                         candidate_start_ndx=config.candidate_start_ndx, candidate_end_ndx=config.candidate_end_ndx)
+        self.init_pooler(
+            self.transformer.config.hidden_size,
+            end_token_only=config.end_token_only,
+            n_classes=config.n_classes,
+            candidate_start_ndx=config.candidate_start_ndx,
+            candidate_end_ndx=config.candidate_end_ndx,
+        )
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            kv_caches: List[torch.Tensor],
+            attn_metadata: AttentionMetadata,
+            intermediate_tensors: Optional[IntermediateTensors] = None,
+            inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        # set the positions of the candidate markers, this is not available later
         self.set_candidate_positions(input_ids)
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata, intermediate_tensors,
